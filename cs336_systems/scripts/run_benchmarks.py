@@ -18,10 +18,25 @@ def cuda_synchronize():
 # Model configurations
 model_configs = {
     'small': {'d_model': 768, 'd_ff': 3072, 'num_layers': 12, 'num_heads': 12},
-    # 'medium': {'d_model': 1024, 'd_ff': 4096, 'num_layers': 24, 'num_heads': 16},
-    # 'large': {'d_model': 1280, 'd_ff': 5120, 'num_layers': 36, 'num_heads': 20},
-    # 'xl': {'d_model': 1600, 'd_ff': 6400, 'num_layers': 48, 'num_heads': 25},
-    # '2.7B': {'d_model': 2560, 'd_ff': 10240, 'num_layers': 32, 'num_heads': 32},
+    'small_2x_heads': {'d_model': 768, 'd_ff': 3072, 'num_layers': 12, 'num_heads': 24},
+    'small_3x_heads': {'d_model': 768, 'd_ff': 3072, 'num_layers': 12, 'num_heads': 36},
+    'small_4x_heads': {'d_model': 768, 'd_ff': 3072, 'num_layers': 12, 'num_heads': 48},
+    'medium': {'d_model': 1024, 'd_ff': 4096, 'num_layers': 24, 'num_heads': 16},
+    'medium_2x_heads': {'d_model': 1024, 'd_ff': 4096, 'num_layers': 24, 'num_heads': 32},
+    'medium_3x_heads': {'d_model': 1024, 'd_ff': 4096, 'num_layers': 24, 'num_heads': 48},
+    'medium_4x_heads': {'d_model': 1024, 'd_ff': 4096, 'num_layers': 24, 'num_heads': 64},
+    'large': {'d_model': 1280, 'd_ff': 5120, 'num_layers': 36, 'num_heads': 20},
+    'large_2x_heads': {'d_model': 1280, 'd_ff': 5120, 'num_layers': 36, 'num_heads': 40},
+    'large_3x_heads': {'d_model': 1280, 'd_ff': 5120, 'num_layers': 36, 'num_heads': 60},
+    'large_4x_heads': {'d_model': 1280, 'd_ff': 5120, 'num_layers': 36, 'num_heads': 80},
+    'xl': {'d_model': 1600, 'd_ff': 6400, 'num_layers': 48, 'num_heads': 25},
+    'xl_2x_heads': {'d_model': 1600, 'd_ff': 6400, 'num_layers': 48, 'num_heads': 50},
+    'xl_3x_heads': {'d_model': 1600, 'd_ff': 6400, 'num_layers': 48, 'num_heads': 75},
+    'xl_4x_heads': {'d_model': 1600, 'd_ff': 6400, 'num_layers': 48, 'num_heads': 100},
+    '2.7B': {'d_model': 2560, 'd_ff': 10240, 'num_layers': 32, 'num_heads': 32},
+    '2.7B_2x_heads': {'d_model': 2560, 'd_ff': 10240, 'num_layers': 32, 'num_heads': 64},
+    '2.7B_3x_heads': {'d_model': 2560, 'd_ff': 10240, 'num_layers': 32, 'num_heads': 96},
+    '2.7B_4x_heads': {'d_model': 2560, 'd_ff': 10240, 'num_layers': 32, 'num_heads': 128},
 }
 
 def create_model(d_model, d_ff, num_layers, num_heads, device='cuda'):
