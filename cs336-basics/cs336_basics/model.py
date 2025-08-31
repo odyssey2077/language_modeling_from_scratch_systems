@@ -228,10 +228,11 @@ class BasicsTransformerLM(nn.Module):
 
         return n_params
 
-    def forward(self, x: Int[Tensor, " ... sequence_length"]) -> Float[Tensor, " ... sequence_length vocab_size"]:
+    def forward(self, x: Int[Tensor, " ... sequence_length"], use_cache: bool = False) -> Float[Tensor, " ... sequence_length vocab_size"]:
         """
         Args:
             x: Input IDs for language modeling.
+            use_cache: Whether to use KV caching for inference.
 
         Returns: A FloatTensor of shape
             (batch size, sequence_length, vocab_size) with the predicted unnormalized next-word
@@ -244,13 +245,18 @@ class BasicsTransformerLM(nn.Module):
 
         for layer in self.layers:
             # (batch size, sequence_length, d_model)
-            x = layer(x)
+            x = layer(x, use_cache=use_cache)
 
         # (batch size, sequence_length, d_model)
         x = self.ln_final(x)
 
         # (batch size, sequence_length, vocab_size)
         return self.lm_head(x)
+    
+    def clear_cache(self):
+        """Clear KV cache for all layers."""
+        for layer in self.layers:
+            layer.attn.clear_cache()
 
     @torch.no_grad()
     def generate(
@@ -260,6 +266,7 @@ class BasicsTransformerLM(nn.Module):
         temperature: float = 1.0,
         top_k: int | None = None,
         eos_token_id: int | None = None,
+        use_cache: bool = True,
     ):
         """
         Args:
@@ -273,6 +280,8 @@ class BasicsTransformerLM(nn.Module):
                 If provided, only sample from the `top_k` vocab items (by probability).
             eos_token_id: int
                 If provided, stop generation when we generate this ID.
+            use_cache: bool
+                Whether to use KV caching for efficient generation.
 
         Returns: A LongTensor of shape (max_new_tokens,) with the generated model output.
         """
@@ -280,16 +289,32 @@ class BasicsTransformerLM(nn.Module):
             x = x.unsqueeze(0)
             
         original_sequence_length = x.size(-1)
-        for _ in range(max_new_tokens):
-            # Take the last `context_length` tokens if the input is
-            # beyond the model's context length
-            x = x[:, -self.context_length :] if x.size(1) > self.context_length else x
-            # Get the logits from the model
-            logits = self.forward(x)
-            # Take the logits for the next token
+        
+        # Clear cache before generation
+        if use_cache:
+            self.clear_cache()
+        
+        # Process the initial prompt
+        if use_cache:
+            # Take the last `context_length` tokens if the input is beyond the model's context length
+            prompt = x[:, -self.context_length :] if x.size(1) > self.context_length else x
+            # Process entire prompt to populate cache
+            logits = self.forward(prompt, use_cache=True)
+            # Take the logits for the last token
             next_token_logits = logits[:, -1]
-            # apply temperature scaling
+        else:
+            # Original implementation for non-cached generation
+            prompt = x[:, -self.context_length :] if x.size(1) > self.context_length else x
+            logits = self.forward(prompt)
+            next_token_logits = logits[:, -1]
+        
+        # Generate tokens one by one
+        generated_tokens = []
+        
+        for i in range(max_new_tokens):
+            # Apply temperature scaling
             temperature_scaled_next_token_logits = next_token_logits / temperature
+            
             # If top-k is provided, take the tokens with the highest score
             if top_k:
                 topk_values, _ = torch.topk(
@@ -300,13 +325,36 @@ class BasicsTransformerLM(nn.Module):
                 threshold = topk_values[:, -1]
                 topk_mask = temperature_scaled_next_token_logits < threshold
                 temperature_scaled_next_token_logits.masked_fill(topk_mask, float("-inf"))
+            
             next_token_probabilities = softmax(temperature_scaled_next_token_logits, dim=-1)
             next_token_id = torch.multinomial(next_token_probabilities, 1)
+            
             # End generation if we see the EOS token ID
             if eos_token_id is not None and next_token_id.item() == eos_token_id:
                 break
-            x = torch.cat((x, next_token_id), dim=-1)
-        new_token_ids = x[:, original_sequence_length:]
+            
+            generated_tokens.append(next_token_id)
+            
+            # Get logits for the next iteration
+            if i < max_new_tokens - 1:  # Don't compute for the last iteration
+                if use_cache:
+                    # With caching, only process the new token
+                    logits = self.forward(next_token_id, use_cache=True)
+                    next_token_logits = logits[:, -1]
+                else:
+                    # Without caching, process the full sequence
+                    x = torch.cat((x, next_token_id), dim=-1)
+                    # Check context length
+                    if x.size(1) > self.context_length:
+                        x = x[:, -self.context_length:]
+                    logits = self.forward(x)
+                    next_token_logits = logits[:, -1]
+        
+        if generated_tokens:
+            new_token_ids = torch.cat(generated_tokens, dim=-1)
+        else:
+            new_token_ids = torch.tensor([], dtype=torch.long, device=x.device).unsqueeze(0)
+        
         return new_token_ids
 
     @classmethod
@@ -365,11 +413,12 @@ class TransformerBlock(nn.Module):
         self.ln1 = RMSNorm(d_model)
         self.ln2 = RMSNorm(d_model)
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor, use_cache: bool = False):
         """
         Args:
             x: FloatTensor of shape `(batch_size, sequence_length, d_model)`.
                 The input to process with the Transformer block.
+            use_cache: Whether to use KV caching for inference.
 
         Returns:
             FloatTensor of shape `(batch_size, sequence_length, d_model)`.
@@ -377,7 +426,7 @@ class TransformerBlock(nn.Module):
         # NOTE: this is a pre-norm Transformer, and differs from the original
         # description in the paper.
         # Apply the multi-head self-attention sublayer
-        x_attn = self.attn(self.ln1(x))
+        x_attn = self.attn(self.ln1(x), use_cache=use_cache)
         attn_sublayer_output = x + x_attn
 
         # Apply the feed-forward sublayer
@@ -474,12 +523,17 @@ class CausalMultiHeadSelfAttention(nn.Module):
         self.output_proj = Linear(self.num_heads * self.d_v, self.d_model)
 
         self.positional_encoder = positional_encoder  # RoPE
+        
+        # KV cache for inference optimization
+        self.k_cache = None
+        self.v_cache = None
 
-    def forward(self, x: Float[Tensor, " ... seq d_k"], token_positions: Int[Tensor, " ... seq"] | None = None) -> Float[Tensor, " ... seq d_v"]:
+    def forward(self, x: Float[Tensor, " ... seq d_k"], token_positions: Int[Tensor, " ... seq"] | None = None, use_cache: bool = False) -> Float[Tensor, " ... seq d_v"]:
         """
         Args:
             x: The input to perform multi-headed self-attention on.
-            positional_ids: The positional indices along the sequence dimension of the input embeddings.
+            token_positions: The positional indices along the sequence dimension of the input embeddings.
+            use_cache: Whether to use KV caching for inference.
 
         Returns:
             Self-attention outputs.
@@ -498,19 +552,52 @@ class CausalMultiHeadSelfAttention(nn.Module):
         )  # fmt: skip
 
         if token_positions is None:
-            token_positions = einx.rearrange("seq -> b... seq", torch.arange(sequence_length, device=x.device), b=[1] * len(b))
+            if use_cache and self.k_cache is not None:
+                # During generation, we're processing a single new token
+                past_seq_len = self.k_cache.shape[-2]
+                token_positions = einx.rearrange("seq -> b... seq", 
+                                                torch.arange(past_seq_len, past_seq_len + sequence_length, device=x.device), 
+                                                b=[1] * len(b))
+            else:
+                token_positions = einx.rearrange("seq -> b... seq", torch.arange(sequence_length, device=x.device), b=[1] * len(b))
 
         # Duplicate token positions for each head
         token_positions = rearrange(token_positions, "... seq -> ... 1 seq")
 
         Q = self.positional_encoder(Q, token_positions)
         K = self.positional_encoder(K, token_positions)
+        
+        if use_cache:
+            if self.k_cache is not None:
+                # Append new keys and values to cache
+                K = torch.cat([self.k_cache, K], dim=-2)
+                V = torch.cat([self.v_cache, V], dim=-2)
+            # Update cache
+            self.k_cache = K
+            self.v_cache = V
 
         # Construct causal mask
-        seq = torch.arange(sequence_length, device=x.device)
-        qi = einx.rearrange('query -> b... 1 query 1', seq, b=[1] * len(b))
-        kj = einx.rearrange('key   -> b... 1 1   key', seq, b=[1] * len(b))
-        causal_mask = qi >= kj  # (query, key)
+        total_seq_len = K.shape[-2]
+        query_seq_len = Q.shape[-2]
+        
+        if use_cache and query_seq_len == 1:
+            # For single token generation, we only need a mask for the new query against all keys
+            causal_mask = einx.rearrange('key -> b... 1 1 1 key', 
+                                        torch.ones(total_seq_len, dtype=torch.bool, device=x.device),
+                                        b=[1] * len(b))
+        else:
+            # Standard causal mask for full sequence
+            query_indices = torch.arange(query_seq_len, device=x.device)
+            key_indices = torch.arange(total_seq_len, device=x.device)
+            qi = einx.rearrange('query -> b... 1 query 1', query_indices, b=[1] * len(b))
+            kj = einx.rearrange('key   -> b... 1 1   key', key_indices, b=[1] * len(b))
+            
+            if use_cache and self.k_cache is not None:
+                # Adjust query indices for cached sequence
+                past_len = total_seq_len - query_seq_len
+                qi = qi + past_len
+            
+            causal_mask = qi >= kj  # (query, key)
 
         # Shape: (..., num_heads, sequence_length, d_k)
         attn_output = scaled_dot_product_attention(K=K, Q=Q, V=V, mask=causal_mask)
@@ -522,6 +609,11 @@ class CausalMultiHeadSelfAttention(nn.Module):
         # Apply the output projection
         output = self.output_proj(attn_output)
         return output
+    
+    def clear_cache(self):
+        """Clear the KV cache."""
+        self.k_cache = None
+        self.v_cache = None
 
 def silu(x: torch.Tensor):
     return x * torch.sigmoid(x)
