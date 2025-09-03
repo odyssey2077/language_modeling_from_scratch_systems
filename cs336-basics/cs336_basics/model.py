@@ -582,7 +582,7 @@ class CausalMultiHeadSelfAttention(nn.Module):
         
         if use_cache and query_seq_len == 1:
             # For single token generation, we only need a mask for the new query against all keys
-            causal_mask = einx.rearrange('key -> b... 1 1 1 key', 
+            causal_mask = einx.rearrange('key -> b... 1 1 key', 
                                         torch.ones(total_seq_len, dtype=torch.bool, device=x.device),
                                         b=[1] * len(b))
         else:
