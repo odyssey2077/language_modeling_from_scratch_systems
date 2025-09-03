@@ -5,8 +5,8 @@ from einops import einsum
 import triton
 import triton.language as tl
 
-QUERY_TILE_SIZE = 16
-KEY_TILE_SIZE = 16
+QUERY_TILE_SIZE = 128
+KEY_TILE_SIZE = 128
 
 # • To debug, we suggest comparing the results of each Triton operation you perform with the
 # tiled PyTorch implementation you wrote in part (a).
